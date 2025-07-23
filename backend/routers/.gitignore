@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+venv/ # Add this too, just in case you use 'venv' in the future
+
+# Compiled Python files
+__pycache__/
+*.pyc
+
+# Environment variables file (important for secrets)
+.env
+git add .gitignore
+git add backend/routers/notifications.py
+git add backend/routers/reports.py # Only include this line if you created reports.py!

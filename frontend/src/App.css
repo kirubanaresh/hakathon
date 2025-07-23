@@ -1,0 +1,63 @@
+/* frontend/src/App.css */
+
+/* Ensures the html and body take up the full viewport */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%; /* Important: makes 100vh in children work reliably */
+  overflow-x: hidden; /* Prevent horizontal scrollbar if content overflows */
+
+  /* --- NEW BACKGROUND STYLES FOR THE ENTIRE APPLICATION --- */
+  background-image: url('/icons/background-app.jpg'); /* Corrected path to the image */
+  background-size: cover; /* Ensures the image covers the entire background, scaling as needed */
+  background-position: center; /* Centers the image */
+  background-repeat: no-repeat; /* Prevents the image from repeating */
+  background-attachment: scroll;  /* IMPORTANT: Makes the background scroll with the content */
+}
+
+#root {
+  margin: 0;
+  padding: 0;
+  text-align: center;
+  min-height: 100vh; /* Make sure #root takes at least the full viewport height */
+  display: flex; /* Use flexbox to organize direct children of #root */
+  flex-direction: column; /* Stack children vertically */
+}
+
+/* Existing styles below */
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: #888;
+}
