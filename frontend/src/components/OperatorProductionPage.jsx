@@ -1,133 +1,151 @@
 // frontend/src/components/OperatorProductionPage.jsx
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import ProductionForm from './ProductionForm'; // Your custom form component
-import { getRecords, putRecords, clearRecords } from '../utils/indexedDB'; // NEW: Import IndexedDB utilities
+import ProductionForm from './ProductionForm';
+import { getRecords, putRecords } from '../utils/indexedDB';
+import { putOfflineAddition, getOfflineAdditions, removeOfflineAddition } from '../utils/offlineAdditions';
 
-// --- MUI IMPORTS ---
+// MUI imports
 import {
-  Box,
-  Typography,
-  Button,
-  TextField,
-  Select,
-  MenuItem,
-  TableContainer,
-  Table,
-  TableHead,
-  TableBody,
-  TableRow,
-  TableCell,
-  Paper,
-  CircularProgress,
-  Alert,
-  FormControl,
-  InputLabel,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
+  Box, Typography, Button, TextField, Select, MenuItem, TableContainer,
+  Table, TableHead, TableBody, TableRow, TableCell, Paper,
+  CircularProgress, Alert, FormControl, InputLabel, IconButton,
+  Dialog, DialogTitle, DialogContent, DialogActions,
+  useTheme, useMediaQuery,
 } from '@mui/material';
+
 // Icons
 import ArrowUpwardIcon from '@mui/icons-material/ArrowUpward';
 import ArrowDownwardIcon from '@mui/icons-material/ArrowDownward';
 import EditIcon from '@mui/icons-material/Edit';
 import DeleteIcon from '@mui/icons-material/Delete';
-import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline'; // For Add button
-import WorkIcon from '@mui/icons-material/Work'; // Icon for operator's page
+import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
+import WorkIcon from '@mui/icons-material/Work';
 
-
-function OperatorProductionPage() {
+export default function OperatorProductionPage() {
   const { user, isAuthenticated, hasRole } = useAuth();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+
   const [productionRecords, setProductionRecords] = useState([]);
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [editingRecord, setEditingRecord] = useState(null);
-  const [isOffline, setIsOffline] = useState(!navigator.onLine); // NEW: Track online/offline status
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
 
-
-  // State for Filters (operator can filter their own records, or admin/supervisor can filter by operator_id)
   const [filters, setFilters] = useState({
     product_name: '',
     machine_id: '',
     quality_status: '',
-    // operator_id is implicitly set by the current user, or explicitly for admin/supervisor
   });
 
-  // State for Sorting
   const [sortBy, setSortBy] = useState('start_time');
   const [sortOrder, setSortOrder] = useState('desc');
 
-  // State for delete confirmation dialog
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [recordToDelete, setRecordToDelete] = useState(null);
 
-  // Define roles for this page's access and actions
   const canViewThisPage = isAuthenticated() && hasRole(['operator', 'supervisor', 'admin']);
-  // Operators can ADD records
   const canAddRecord = isAuthenticated() && hasRole(['operator', 'supervisor', 'admin']);
-
-  // Only Supervisors and Admins can edit/delete ANY record
   const canEditAny = hasRole(['supervisor', 'admin']);
   const canDeleteAny = hasRole(['admin']);
-  // isCurrentUserOperator is now only used for filtering the data displayed, not for granting edit/delete permissions
   const isCurrentUserOperator = hasRole(['operator']);
 
-  // NEW: Handle online/offline status changes
+  // Listen online/offline events
   useEffect(() => {
     const handleOnline = () => setIsOffline(false);
     const handleOffline = () => setIsOffline(true);
-
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
+  // Sync offline additions on reconnect
+  useEffect(() => {
+    if (!isOffline) {
+      syncOfflineAdditions();
+    }
+  }, [isOffline]);
+
+  const syncOfflineAdditions = async () => {
+    try {
+      const offlineEntries = await getOfflineAdditions();
+      if (offlineEntries.length === 0) return;
+
+      const token = localStorage.getItem('access_token');
+      const tokenType = localStorage.getItem('token_type');
+      let syncedAny = false;
+
+      for (const entry of offlineEntries) {
+        try {
+          const payload = { ...entry };
+          delete payload.local_id;
+          delete payload.synced;
+          delete payload.created_at;
+
+          if (!payload.operator_id && isCurrentUserOperator && user?.username) {
+            payload.operator_id = user.username;
+          }
+
+          const response = await fetch('http://localhost:8000/production-data/', {
+            method: 'POST',
+            headers: {
+              'Authorization': `${tokenType} ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          });
+
+          if (response.ok) {
+            await removeOfflineAddition(entry.local_id);
+            syncedAny = true;
+          }
+        } catch (err) {
+          console.error('Error syncing offline entry:', err);
+        }
+      }
+
+      if (syncedAny) {
+        setMessage('Offline records synced successfully.');
+        fetchProductionRecords();
+      }
+    } catch (err) {
+      console.error('Offline sync error:', err);
+    }
+  };
+
   const fetchProductionRecords = useCallback(async () => {
     if (!canViewThisPage) {
       setMessage('You do not have permission to view this production data.');
-      setLoading(false);
       setProductionRecords([]);
+      setLoading(false);
       return;
     }
 
     setLoading(true);
     setMessage('');
-    let fetchedFromNetwork = false;
 
     try {
-      if (!isOffline) { // Only try network fetch if online
+      if (!isOffline) {
         const token = localStorage.getItem('access_token');
         const tokenType = localStorage.getItem('token_type');
 
-        // Construct URL with query parameters for filtering and sorting
-        const queryParams = new URLSearchParams();
-        if (filters.product_name) queryParams.append('product_name', filters.product_name);
-        if (filters.machine_id) queryParams.append('machine_id', filters.machine_id);
-        if (filters.quality_status) queryParams.append('quality_status', filters.quality_status);
-
-        // IMPORTANT: Filter by current user's username if they are an operator
-        // Or, if Admin/Supervisor, allow them to see all or filter by operator_id
+        const params = new URLSearchParams();
+        if (filters.product_name) params.append('product_name', filters.product_name);
+        if (filters.machine_id) params.append('machine_id', filters.machine_id);
+        if (filters.quality_status) params.append('quality_status', filters.quality_status);
         if (isCurrentUserOperator && user?.username) {
-          queryParams.append('operator_id', user.username);
-        } else if (hasRole(['admin', 'supervisor']) && filters.operator_id) {
-          // If admin/supervisor, and they explicitly set an operator_id filter
-          queryParams.append('operator_id', filters.operator_id);
-        } else if (hasRole(['admin', 'supervisor'])) {
-          // If admin/supervisor and no operator_id filter is set, show all records
-          // No operator_id filter needed here, it will fetch all by default from backend
+          params.append('operator_id', user.username);
         }
+        params.append('sort_by', sortBy);
+        params.append('sort_order', sortOrder);
 
-        queryParams.append('sort_by', sortBy);
-        queryParams.append('sort_order', sortOrder);
-
-        const url = `http://localhost:8000/production-data/?${queryParams.toString()}`;
+        const url = `http://localhost:8000/production-data/?${params.toString()}`;
 
         const response = await fetch(url, {
           method: 'GET',
@@ -140,92 +158,47 @@ function OperatorProductionPage() {
         if (response.ok) {
           const data = await response.json();
           setProductionRecords(data);
-          setMessage('Production records loaded successfully from network.');
-          fetchedFromNetwork = true;
-          // NEW: Cache data in IndexedDB
-          // Only cache the records relevant to this page (e.g., filtered by operator_id if operator)
+          setMessage('Production records loaded successfully.');
           await putRecords(data);
         } else {
-          const errorData = await response.json();
-          setMessage(`Failed to load records from network: ${errorData.detail || response.statusText || 'Unknown error'}. Attempting to load from offline cache.`);
-          console.error('Network fetch error:', errorData);
-          // Fallback to IndexedDB if network fails
-          const offlineData = await getRecords();
-          // Filter offline data by operator_id if current user is an operator
-          const filteredOfflineData = isCurrentUserOperator && user?.username
-            ? offlineData.filter(record => record.operator_id === user.username)
-            : offlineData;
-          setProductionRecords(filteredOfflineData);
-          if (filteredOfflineData.length > 0) {
-            setMessage('Production records loaded from offline cache.');
-          } else {
-            setMessage('No production records found in offline cache.');
-          }
+          const errData = await response.json();
+          setMessage(
+            `Failed to load data from network: ${errData.detail || response.statusText || 'Unknown error'}. Showing cached data.`
+          );
+          const cachedData = await getRecords();
+          const filteredData = isCurrentUserOperator && user?.username
+            ? cachedData.filter((r) => r.operator_id === user.username)
+            : cachedData;
+          setProductionRecords(filteredData);
         }
+      } else {
+        const cachedData = await getRecords();
+        const filteredData = isCurrentUserOperator && user?.username
+          ? cachedData.filter((r) => r.operator_id === user.username)
+          : cachedData;
+        setProductionRecords(filteredData);
+        setMessage('You are offline. Displaying cached production data.');
       }
-    } catch (networkError) {
-      setMessage(`Network error: ${networkError.message}. Attempting to load from offline cache.`);
-      console.error('Network error during fetch:', networkError);
-      // Fallback to IndexedDB on network error
-      try {
-        const offlineData = await getRecords();
-        // Filter offline data by operator_id if current user is an operator
-        const filteredOfflineData = isCurrentUserOperator && user?.username
-            ? offlineData.filter(record => record.operator_id === user.username)
-            : offlineData;
-        setProductionRecords(filteredOfflineData);
-        if (filteredOfflineData.length > 0) {
-          setMessage('Production records loaded from offline cache.');
-        } else {
-          setMessage('No production records found in offline cache.');
-        }
-      } catch (indexedDBError) {
-        setMessage(`Failed to load records from offline cache: ${indexedDBError.message}.`);
-        console.error('IndexedDB error:', indexedDBError);
-        setProductionRecords([]);
-      }
+    } catch (err) {
+      setMessage(`Error loading production data: ${err.message}`);
+      setProductionRecords([]);
     } finally {
       setLoading(false);
-      // If we didn't fetch from network (e.g., initially offline), try loading from IndexedDB
-      if (!fetchedFromNetwork && isOffline) {
-        try {
-          const offlineData = await getRecords();
-          const filteredOfflineData = isCurrentUserOperator && user?.username
-            ? offlineData.filter(record => record.operator_id === user.username)
-            : offlineData;
-          setProductionRecords(filteredOfflineData);
-          if (filteredOfflineData.length > 0) {
-            setMessage('Currently offline. Production records loaded from offline cache.');
-          } else {
-            setMessage('Currently offline. No production records found in offline cache.');
-          }
-        } catch (indexedDBError) {
-          setMessage(`Currently offline. Failed to load records from offline cache: ${indexedDBError.message}.`);
-          console.error('IndexedDB error:', indexedDBError);
-          setProductionRecords([]);
-        }
-      }
     }
-  }, [isAuthenticated, canViewThisPage, filters, sortBy, sortOrder, isOffline, user?.username, isCurrentUserOperator, hasRole]);
-
+  }, [canViewThisPage, filters, sortBy, sortOrder, isOffline, user?.username, isCurrentUserOperator]);
 
   useEffect(() => {
     fetchProductionRecords();
   }, [fetchProductionRecords]);
 
-  // Handlers for Filter Inputs
   const handleFilterChange = (e) => {
     const { name, value } = e.target;
-    setFilters(prevFilters => ({
-      ...prevFilters,
-      [name]: value
-    }));
+    setFilters((prev) => ({ ...prev, [name]: value }));
   };
 
-  // Handlers for Applying/Clearing Filters
   const handleApplyFilters = () => {
     if (isOffline) {
-      setMessage('Cannot apply filters while offline. Data displayed is from cache.');
+      setMessage('Filtering is disabled while offline, displaying cached data.');
       return;
     }
     fetchProductionRecords();
@@ -236,73 +209,64 @@ function OperatorProductionPage() {
       product_name: '',
       machine_id: '',
       quality_status: '',
-      ...(hasRole(['admin', 'supervisor']) && { operator_id: '' }),
     });
     setSortBy('start_time');
     setSortOrder('desc');
-    if (isOffline) {
-      setMessage('Cannot clear filters while offline. Data displayed is from cache. Reconnect to sync.');
-      // If offline, re-fetch from IndexedDB to show all cached data (if filters were applied previously)
-      fetchProductionRecords();
-    } else {
-      fetchProductionRecords();
-    }
+    fetchProductionRecords();
   };
 
-  // Handler for Sorting
   const handleSort = (field) => {
     if (isOffline) {
-      setMessage('Cannot sort data while offline. Data displayed is from cache.');
+      setMessage('Sorting is disabled while offline, displaying cached data.');
       return;
     }
     if (sortBy === field) {
-      setSortOrder(prevOrder => (prevOrder === 'asc' ? 'desc' : 'asc'));
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
       setSortBy(field);
       setSortOrder('asc');
     }
   };
 
-  // Helper to render sort indicator icon
   const renderSortIndicator = (field) => {
-    if (sortBy === field) {
-      return sortOrder === 'asc' ? <ArrowUpwardIcon fontSize="small" sx={{ verticalAlign: 'middle', ml: 0.5 }} /> : <ArrowDownwardIcon fontSize="small" sx={{ verticalAlign: 'middle', ml: 0.5 }} />;
+    if (field === sortBy) {
+      return sortOrder === 'asc' ? <ArrowUpwardIcon fontSize="small" /> : <ArrowDownwardIcon fontSize="small" />;
     }
     return null;
   };
 
-  // --- Form Handlers ---
   const handleAddRecordClick = () => {
-    if (isOffline) {
-      setMessage('Cannot add new records while offline. Please connect to the internet.');
-      return;
-    }
     setEditingRecord(null);
     setShowForm(true);
   };
 
-  const handleEditRecordClick = (record) => {
-    if (isOffline) {
-      setMessage('Cannot edit records while offline. Please connect to the internet.');
-      return;
-    }
-    // Operators cannot edit, so we only allow if it's an Admin/Supervisor
-    if (!canEditAny) {
-      setMessage('You do not have permission to edit records.');
-      return;
-    }
-    setEditingRecord(record);
-    setShowForm(true);
-  };
-
   const handleSave = async (recordData) => {
+    setMessage('');
     if (isOffline) {
-      setMessage('Cannot save records while offline. Changes will not be synchronized.');
-      setShowForm(false);
-      setEditingRecord(null);
+      let operatorId = recordData.operator_id;
+      if (!operatorId && isCurrentUserOperator && user?.username) {
+        operatorId = user.username;
+      }
+
+      const offlineRecord = {
+        ...recordData,
+        operator_id: operatorId,
+        id: 'offline_' + Date.now(),
+        localId: Date.now(),
+      };
+
+      try {
+        await putOfflineAddition(offlineRecord);
+        setMessage('Record saved locally; will sync when online.');
+        setShowForm(false);
+        setEditingRecord(null);
+        setProductionRecords((prev) => [...prev, offlineRecord]);
+      } catch (err) {
+        setMessage('Failed to save record offline.');
+      }
       return;
     }
-    setMessage('');
+
     try {
       const token = localStorage.getItem('access_token');
       const tokenType = localStorage.getItem('token_type');
@@ -312,8 +276,8 @@ function OperatorProductionPage() {
       }
 
       let response;
+
       if (recordData.id) {
-        // Only allow save if user has edit permissions
         if (!canEditAny) {
           setMessage('You do not have permission to update records.');
           return;
@@ -327,7 +291,6 @@ function OperatorProductionPage() {
           body: JSON.stringify(recordData),
         });
       } else {
-        // Adding new record is allowed for operators
         response = await fetch('http://localhost:8000/production-data/', {
           method: 'POST',
           headers: {
@@ -339,17 +302,15 @@ function OperatorProductionPage() {
       }
 
       if (response.ok) {
-        setMessage(`Record ${recordData.id ? 'updated' : 'added'} successfully!`);
+        setMessage(`Record ${recordData.id ? 'updated' : 'added'} successfully.`);
         setShowForm(false);
-        fetchProductionRecords(); // Refresh the list (will also update IndexedDB)
+        fetchProductionRecords();
       } else {
-        const errorData = await response.json();
-        setMessage(`Operation failed: ${errorData.detail || response.statusText || 'Unknown error'}`);
-        console.error('API error:', errorData);
+        const errData = await response.json();
+        setMessage(`Operation failed: ${errData.detail || response.statusText || 'Unknown error'}`);
       }
-    } catch (error) {
-      setMessage(`Network error: ${error.message}. Please check your connection.`);
-      console.error('Network error:', error);
+    } catch (err) {
+      setMessage(`Network error: ${err.message}`);
     }
   };
 
@@ -358,13 +319,24 @@ function OperatorProductionPage() {
     setEditingRecord(null);
   };
 
-  // --- Delete Handlers ---
-  const handleDeleteClick = (recordId) => {
+  const handleEditRecordClick = (record) => {
     if (isOffline) {
-      setMessage('Cannot delete records while offline. Please connect to the internet.');
+      setMessage('Editing records is not allowed while offline.');
       return;
     }
-    // Only allow delete if user has delete permissions
+    if (!canEditAny) {
+      setMessage('You do not have permission to edit records.');
+      return;
+    }
+    setEditingRecord(record);
+    setShowForm(true);
+  };
+
+  const handleDeleteClick = (recordId) => {
+    if (isOffline) {
+      setMessage('Deleting records is not allowed while offline.');
+      return;
+    }
     if (!canDeleteAny) {
       setMessage('You do not have permission to delete records.');
       return;
@@ -375,15 +347,12 @@ function OperatorProductionPage() {
 
   const handleConfirmDelete = async () => {
     if (!recordToDelete) return;
-
     setMessage('');
     setShowConfirmDialog(false);
-
     try {
       const token = localStorage.getItem('access_token');
       const tokenType = localStorage.getItem('token_type');
 
-      // Only allow delete if user has delete permissions
       if (!canDeleteAny) {
         setMessage('You do not have permission to delete records.');
         return;
@@ -398,15 +367,13 @@ function OperatorProductionPage() {
 
       if (response.ok) {
         setMessage('Record deleted successfully.');
-        fetchProductionRecords(); // Refresh the list (will also update IndexedDB)
+        fetchProductionRecords();
       } else {
-        const errorData = await response.json();
-        setMessage(`Failed to delete record: ${errorData.detail || response.statusText || 'Unknown error'}`);
-        console.error('Delete error:', errorData);
+        const errData = await response.json();
+        setMessage(`Failed to delete record: ${errData.detail || response.statusText || 'Unknown error'}`);
       }
-    } catch (error) {
-      setMessage(`Network error during deletion: ${error.message}. Please check your connection.`);
-      console.error('Network error:', error);
+    } catch (err) {
+      setMessage(`Network error during deletion: ${err.message}`);
     } finally {
       setRecordToDelete(null);
     }
@@ -417,315 +384,283 @@ function OperatorProductionPage() {
     setRecordToDelete(null);
   };
 
-
   if (!canViewThisPage) {
     return (
-      <Box
-        sx={{
-          p: 3,
-          margin: 0,
-          width: '100%',
-          minHeight: '100%',
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          bgcolor: 'background.default', // Keep background for permission denied message
-        }}
-      >
-        <Alert severity="error" sx={{ maxWidth: '600px' }}>
-          You do not have sufficient privileges to view this page.
-        </Alert>
+      <Box p={2}>
+        <Alert severity="error">You do not have sufficient privileges to view this page.</Alert>
       </Box>
     );
   }
 
-
   return (
     <Box
       sx={{
-        p: 0,
-        margin: 0,
-        width: '100%',
-        minHeight: '100%',
-        bgcolor: 'background.default', // Re-added bgcolor for this page
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        bgcolor: 'background.default',
+        px: 2,
+        py: 3,
       }}
     >
       <Box
-        component={Paper}
+        // Container Box with boxShadow and responsive widths/margins
         sx={{
-          p: 3,
-          borderRadius: '8px',
-          boxShadow: 6,
-          transition: 'box-shadow 0.3s ease-in-out',
-          '&:hover': {
-            boxShadow: '0 8px 25px rgba(0,0,0,0.15)',
-          },
-          bgcolor: 'background.paper', // This Paper component will have a white background
-          maxWidth: 'lg',
+          maxWidth: { xs: '100%', sm: 900, md: 1200 },
+          width: '100%',
+          bgcolor: 'background.paper',
+          boxShadow: 4,
+          borderRadius: 2,
           mx: 'auto',
-          my: 4,
+          p: 3,
+          flexGrow: 1,
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
-        <Typography variant="h4" component="h2" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
-          <WorkIcon sx={{ mr: 1 }} /> My Production Records
-        </Typography>
+        {/* Header */}
+        <Box display="flex" alignItems="center" mb={3}>
+          <WorkIcon fontSize="large" color="primary" sx={{ mr: 1 }} />
+          <Typography variant="h5" component="h1" sx={{ fontWeight: 'bold' }}>
+            My Production Records
+          </Typography>
+        </Box>
 
-        {message && (
-          <Alert
-            severity={message.includes('Failed') || message.includes('error') ? 'error' : 'success'}
-            sx={{ mb: 2 }}
-          >
-            {message}
-          </Alert>
-        )}
+        {/* Messages */}
+        {message && <Alert severity="info" sx={{ mb: 2 }}>{message}</Alert>}
         {isOffline && (
           <Alert severity="warning" sx={{ mb: 2 }}>
-            You are currently offline. Data is loaded from your local cache and may not be the most recent.
-            Actions like adding, editing, or deleting records will not work until you are online.
+            You are currently offline. Displaying cached data. New entries will be saved locally until online.
           </Alert>
         )}
 
-        {/* --- Filter & Search Section --- */}
+        {/* Filters & Buttons Container */}
         <Box
+          mb={2}
           sx={{
-            bgcolor: '#f9f9f9', // This filter box has its own light background
-            p: 3,
-            borderRadius: '8px',
-            mb: 3,
-            border: '1px solid #ddd'
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 2,
           }}
         >
-          <Typography variant="h6" component="h3" gutterBottom>
-            Filter Records
-          </Typography>
-          <Box
+          {/* Filters as flex children with min width for responsiveness */}
+          <TextField
+            label="Product"
+            name="product_name"
+            value={filters.product_name}
+            onChange={handleFilterChange}
+            size="medium"
+            sx={{ minWidth: 150, flexGrow: 1, flexBasis: { xs: '100%', sm: 'auto' } }}
+          />
+          <TextField
+            label="Machine"
+            name="machine_id"
+            value={filters.machine_id}
+            onChange={handleFilterChange}
+            size="medium"
+            sx={{ minWidth: 150, flexGrow: 1, flexBasis: { xs: '100%', sm: 'auto' } }}
+          />
+          <FormControl
+            size="medium"
             sx={{
-              display: 'grid',
-              gridTemplateColumns: {
-                xs: '1fr',
-                sm: 'repeat(2, 1fr)',
-                md: 'repeat(3, 1fr)',
-                // Only show operator_id filter if admin/supervisor
-                ...(hasRole(['admin', 'supervisor']) && { lg: 'repeat(4, 1fr)' }),
-                ...(!hasRole(['admin', 'supervisor']) && { lg: 'repeat(3, 1fr)' }), // Adjust if no operator_id filter
+              minWidth: 160,
+              flexGrow: 1,
+              flexBasis: { xs: '100%', sm: 'auto' },
+              '& .MuiInputBase-root': {
+                fontSize: '1.1rem',
+                paddingRight: '8px',
               },
-              gap: 2,
-              mb: 2
             }}
           >
-            <TextField
-              label="Product Name"
-              id="product-name-filter"
-              name="product_name"
-              value={filters.product_name}
+            <InputLabel id="quality-status-label" sx={{ fontSize: '1.1rem' }}>Quality Status</InputLabel>
+            <Select
+              labelId="quality-status-label"
+              name="quality_status"
+              value={filters.quality_status}
               onChange={handleFilterChange}
-              fullWidth
-              variant="outlined"
-              size="small"
-              placeholder="e.g., Widget A"
-              disabled={isOffline} // Disable filters when offline
-            />
-            <TextField
-              label="Machine ID"
-              id="machine-id-filter"
-              name="machine_id"
-              value={filters.machine_id}
-              onChange={handleFilterChange}
-              fullWidth
-              variant="outlined"
-              size="small"
-              placeholder="e.g., Machine-001"
-              disabled={isOffline} // Disable filters when offline
-            />
-            <FormControl fullWidth variant="outlined" size="small">
-              <InputLabel id="quality-status-filter-label">Quality Status</InputLabel>
-              <Select
-                labelId="quality-status-filter-label"
-                id="quality-status-filter"
-                name="quality_status"
-                value={filters.quality_status}
-                onChange={handleFilterChange}
-                label="Quality Status"
-                disabled={isOffline} // Disable filters when offline
-              >
-                <MenuItem value="">All Statuses</MenuItem>
-                <MenuItem value="Passed">Passed</MenuItem>
-                <MenuItem value="Failed">Failed</MenuItem>
-                <MenuItem value="Pending">Pending</MenuItem>
-              </Select>
-            </FormControl>
-            {/* Only show operator_id filter for Admin/Supervisor */}
-            {hasRole(['admin', 'supervisor']) && (
-              <TextField
-                label="Operator ID"
-                id="operator-id-filter"
-                name="operator_id"
-                value={filters.operator_id}
-                onChange={handleFilterChange}
-                fullWidth
-                variant="outlined"
-                size="small"
-                placeholder="e.g., Op-005"
-                disabled={isOffline} // Disable filters when offline
-              />
-            )}
-          </Box>
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
-              <Button variant="contained" onClick={handleApplyFilters} disabled={isOffline}>Apply Filters</Button>
-              <Button variant="outlined" onClick={handleClearFilters} disabled={isOffline}>Clear Filters</Button>
-          </Box>
-        </Box>
-
-        {/* --- Action Buttons (Add New) --- */}
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 2, mb: 3 }}>
-          {canAddRecord && (
-            <Button
-              variant="contained"
-              color="primary"
-              onClick={handleAddRecordClick}
-              startIcon={<AddCircleOutlineIcon />}
-              disabled={isOffline} // Disable when offline
+              label="Quality Status"
+              sx={{ fontSize: '1.1rem', height: 48 }}  // increased height for bigger button
             >
-              Add New Production Record
+              <MenuItem value="">All Statuses</MenuItem>
+              <MenuItem value="Passed">Passed</MenuItem>
+              <MenuItem value="Failed">Failed</MenuItem>
+              <MenuItem value="Pending">Pending</MenuItem>
+            </Select>
+          </FormControl>
+
+          {/* Search Buttons group aligned in same row */}
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              flexShrink: 0,
+            }}
+          >
+            <Button
+              variant="outlined"
+              onClick={handleApplyFilters}
+              size="medium"
+            >
+              Search
             </Button>
-          )}
+            <Button
+              variant="outlined"
+              onClick={handleClearFilters}
+              size="medium"
+              sx={{
+                border: '1.5px solid',
+                borderColor: 'grey.700',
+                whiteSpace: 'nowrap',
+                fontWeight: 'bold',
+              }}
+            >
+              Clear Filters
+            </Button>
+          </Box>
         </Box>
 
-        {/* --- Production Records Table --- */}
-        {loading ? (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
-            <CircularProgress />
-            <Typography sx={{ ml: 2 }}>Loading records...</Typography>
-          </Box>
-        ) : productionRecords.length > 0 ? (
-          <TableContainer component={Paper} sx={{ mt: 3, boxShadow: 3 }}>
-            <Table sx={{ minWidth: 650 }} aria-label="my production records table">
-              <TableHead>
+        {/* Fixed row for Add New Production and Clear Filters Buttons */}
+        <Box
+          mb={3}
+          sx={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 2,
+          }}
+        >
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={<AddCircleOutlineIcon />}
+            onClick={handleAddRecordClick}
+            size="large"
+            sx={{ whiteSpace: 'nowrap', minWidth: 200, flexGrow: 1, maxWidth: 320 }}
+          >
+            Add New Production Record
+          </Button>
+          {/* Optionally you can remove this "Clear Filters" here or keep as you like.
+              If you want another Clear Filters button here just replicate the button. */}
+        </Box>
+
+        {/* Production Records Table */}
+        <TableContainer component={Paper} sx={{ maxHeight: '60vh' }}>
+          <Table stickyHeader size={isMobile ? "small" : "medium"}>
+            <TableHead>
+              <TableRow>
+                {[
+                  { id: 'id', label: 'ID' },
+                  { id: 'product_name', label: 'Product' },
+                  { id: 'machine_id', label: 'Machine' },
+                  { id: 'operator_id', label: 'Operator' },
+                  { id: 'quantity_produced', label: 'Quantity' },
+                  { id: 'start_time', label: 'Start Time' },
+                  { id: 'end_time', label: 'End Time' },
+                  { id: 'quality_status', label: 'Quality' },
+                  { id: 'notes', label: 'Notes' },
+                ].map((headCell) => (
+                  <TableCell
+                    key={headCell.id}
+                    onClick={() => handleSort(headCell.id)}
+                    sx={{
+                      fontWeight: 'bold',
+                      cursor: isOffline ? 'not-allowed' : 'pointer',
+                      whiteSpace: 'nowrap',
+                      userSelect: 'none',
+                      '&:hover': {
+                        backgroundColor: isOffline ? 'inherit' : 'action.hover',
+                      },
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`Sort by ${headCell.label}`}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        handleSort(headCell.id);
+                      }
+                    }}
+                  >
+                    {headCell.label}
+                    {renderSortIndicator(headCell.id)}
+                  </TableCell>
+                ))}
+                {(canEditAny || canDeleteAny) && <TableCell>Actions</TableCell>}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {loading ? (
                 <TableRow>
-                  {[
-                    { id: 'id', label: 'ID' },
-                    { id: 'product_name', label: 'Product' },
-                    { id: 'machine_id', label: 'Machine' },
-                    { id: 'operator_id', label: 'Operator' },
-                    { id: 'quantity_produced', label: 'Quantity' },
-                    { id: 'start_time', label: 'Start Time' },
-                    { id: 'end_time', label: 'End Time' },
-                    { id: 'quality_status', label: 'Quality' },
-                    { id: 'notes', label: 'Notes' },
-                  ].map((headCell) => (
-                    <TableCell
-                      key={headCell.id}
-                      sortDirection={sortBy === headCell.id ? sortOrder : false}
-                      onClick={() => handleSort(headCell.id)}
-                      sx={{
-                        fontWeight: 'bold',
-                        cursor: isOffline ? 'not-allowed' : 'pointer', // Change cursor when offline
-                        '&:hover': {
-                          backgroundColor: isOffline ? 'inherit' : 'action.hover', // No hover effect when offline
-                        },
-                        whiteSpace: 'nowrap',
-                      }}
-                    >
-                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                        {headCell.label}
-                        {renderSortIndicator(headCell.id)}
-                      </Box>
-                    </TableCell>
-                  ))}
-                  {(canEditAny || canDeleteAny) && <TableCell sx={{ fontWeight: 'bold', whiteSpace: 'nowrap' }}>Actions</TableCell>} {/* Modified */}
+                  <TableCell colSpan={11} align="center">
+                    <CircularProgress size={32} />
+                  </TableCell>
                 </TableRow>
-              </TableHead>
-              <TableBody>
-                {productionRecords.map((record) => {
-                  // Determine if the current user can edit/delete this specific record
-                  // Operators CANNOT edit/delete, only Admins/Supervisors can.
-                  const canEditThisRecord = canEditAny; // Only allow if Admin/Supervisor
-                  const canDeleteThisRecord = canDeleteAny; // Only allow if Admin
+              ) : productionRecords.length > 0 ? (
+                productionRecords.map((record) => (
+                  <TableRow key={record.id || record.localId}>
+                    <TableCell>{record.id}</TableCell>
+                    <TableCell>{record.product_name}</TableCell>
+                    <TableCell>{record.machine_id}</TableCell>
+                    <TableCell>{record.operator_id}</TableCell>
+                    <TableCell>{record.quantity_produced}</TableCell>
+                    <TableCell>{record.start_time ? new Date(record.start_time).toLocaleString() : '-'}</TableCell>
+                    <TableCell>{record.end_time ? new Date(record.end_time).toLocaleString() : '-'}</TableCell>
+                    <TableCell>{record.quality_status}</TableCell>
+                    <TableCell>{record.notes || '-'}</TableCell>
+                    {(canEditAny || canDeleteAny) && (
+                      <TableCell>
+                        {canEditAny && (
+                          <IconButton
+                            onClick={() => handleEditRecordClick(record)}
+                            aria-label="edit"
+                            disabled={isOffline}
+                          >
+                            <EditIcon />
+                          </IconButton>
+                        )}
+                        {canDeleteAny && (
+                          <IconButton
+                            onClick={() => handleDeleteClick(record.id)}
+                            aria-label="delete"
+                            disabled={isOffline}
+                          >
+                            <DeleteIcon />
+                          </IconButton>
+                        )}
+                      </TableCell>
+                    )}
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={11} align="center">
+                    No production data found. {canAddRecord && "Click 'Add New Production Record' to start."}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
 
-                  return (
-                    <TableRow key={record.id} hover>
-                      <TableCell>{record.id}</TableCell>
-                      <TableCell>{record.product_name}</TableCell>
-                      <TableCell>{record.machine_id}</TableCell>
-                      <TableCell>{record.operator_id}</TableCell>
-                      <TableCell>{record.quantity_produced}</TableCell>
-                      <TableCell>{new Date(record.start_time).toLocaleString()}</TableCell>
-                      <TableCell>{new Date(record.end_time).toLocaleString()}</TableCell>
-                      <TableCell>{record.quality_status}</TableCell>
-                      <TableCell>{record.notes || '-'}</TableCell>
-                      {(canEditThisRecord || canDeleteThisRecord) && (
-                        <TableCell sx={{ whiteSpace: 'nowrap' }}>
-                          {canEditThisRecord && (
-                            <IconButton
-                              color="primary"
-                              size="small"
-                              onClick={() => handleEditRecordClick(record)}
-                              sx={{ mr: 1 }}
-                              aria-label="edit"
-                              disabled={isOffline} // Disable when offline
-                            >
-                              <EditIcon />
-                            </IconButton>
-                          )}
-                          {canDeleteThisRecord && (
-                            <IconButton
-                              color="error"
-                              size="small"
-                              onClick={() => handleDeleteClick(record.id)}
-                              aria-label="delete"
-                              disabled={isOffline} // Disable when offline
-                            >
-                              <DeleteIcon />
-                            </IconButton>
-                          )}
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        ) : (
-          <Typography sx={{ textAlign: 'center', mt: 3, color: 'text.secondary' }}>
-            No production data found. {canAddRecord && "Click 'Add New Production Record' to start."}
-          </Typography>
-        )}
-
-        {/* --- Conditionally render the form --- */}
+        {/* Production Form Modal */}
         {showForm && (
           <ProductionForm
-            initialData={editingRecord}
+            record={editingRecord}
             onSave={handleSave}
             onCancel={handleCancelForm}
           />
         )}
 
-        {/* --- Delete Confirmation Dialog --- */}
-        <Dialog
-          open={showConfirmDialog}
-          onClose={handleCancelDelete}
-          aria-labelledby="alert-dialog-title"
-          aria-describedby="alert-dialog-description"
-        >
-          <DialogTitle id="alert-dialog-title">{"Confirm Deletion"}</DialogTitle>
-          <DialogContent>
-            <Typography id="alert-dialog-description">
-              Are you sure you want to delete this record? This action cannot be undone.
-            </Typography>
-          </DialogContent>
+        {/* Delete Confirmation Dialog */}
+        <Dialog open={showConfirmDialog} onClose={handleCancelDelete}>
+          <DialogTitle>Confirm Deletion</DialogTitle>
+          <DialogContent>Are you sure you want to delete this record? This action cannot be undone.</DialogContent>
           <DialogActions>
-            <Button onClick={handleCancelDelete} color="primary" disabled={isOffline}>
-              Cancel
-            </Button>
-            <Button onClick={handleConfirmDelete} color="error" autoFocus disabled={isOffline}>
-              Delete
-            </Button>
+            <Button onClick={handleCancelDelete}>Cancel</Button>
+            <Button color="error" onClick={handleConfirmDelete}>Delete</Button>
           </DialogActions>
         </Dialog>
       </Box>
     </Box>
   );
 }
-
-export default OperatorProductionPage;
