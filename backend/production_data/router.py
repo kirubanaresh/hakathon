@@ -181,7 +181,7 @@ async def get_all_production_records(
                 match = False
         else:  # operator
             # Operator sees only own records
-            if record.operator_id != current_user.username:
+            if record.operator_id != current_user.username and record.status not in (ProductionStatus.pending, ProductionStatus.approved):
                 match = False
 
         # Apply filters (case-insensitive for strings)
@@ -195,8 +195,6 @@ async def get_all_production_records(
             match = False
         # Status filter overrides role-based defaults if provided
         if status and record.status != status:
-            match = False
-        if record.status != ProductionStatus.approved:
             match = False
         if match:
             filtered.append(record)
