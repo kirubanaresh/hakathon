@@ -219,7 +219,13 @@ class NotificationResponse(NotificationBase):
     )
 
 
-# --- Production Data Schemas ---
+class ProductionStatus(str, Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+
+# --- Production Data Schemas with Approval Workflow ---
+
 class ProductionDataCreate(BaseModel):
     productName: str
     machineId: str
@@ -230,23 +236,44 @@ class ProductionDataCreate(BaseModel):
     comments: Optional[str] = None
     timeTakenMinutes: Optional[int] = None
 
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "productName": "Widget A",
-            "machineId": "M-001",
-            "quantityProduced": 150,
-            "operatorId": "OP-789",
-            "production_date": "2024-06-25T10:00:00Z",
-            "shift": "Day",
-            "comments": "Smooth run",
-            "timeTakenMinutes": 120
+    # Status is optional and defaults to 'pending', but clients should NOT set this explicitly
+    status: Optional[ProductionStatus] = Field(
+        default=ProductionStatus.pending,
+        description="Approval status of the production data record. Defaults to 'pending' on creation."
+    )
+
+    model_config = dict(
+        json_schema_extra={
+            "example": {
+                "productName": "Widget A",
+                "machineId": "M-001",
+                "quantityProduced": 150,
+                "operatorId": "OP-789",
+                "production_date": "2024-06-25T10:00:00Z",
+                "shift": "Day",
+                "comments": "Smooth run",
+                "timeTakenMinutes": 120,
+                "status": "pending",
+            }
         }
-    })
+    )
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def prevent_client_set_status(cls, v):
+        # Force status to pending on creation ignoring any client input
+        return ProductionStatus.pending
+
 
 class ProductionDataResponse(ProductionDataCreate):
-    id: PyObjectId = Field(alias="_id") # Using PyObjectId here
+    id: PyObjectId = Field(alias="_id")
 
-    model_config = ConfigDict(arbitrary_types_allowed=True, json_encoders={ObjectId: str}, populate_by_name=True)
+    model_config = dict(
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str},
+        populate_by_name=True,
+    )
+
 
 class ProductionDataUpdate(BaseModel):
     productName: Optional[str] = None
@@ -257,13 +284,23 @@ class ProductionDataUpdate(BaseModel):
     shift: Optional[str] = None
     comments: Optional[str] = None
     timeTakenMinutes: Optional[int] = None
+    status: Optional[ProductionStatus] = Field(
+        None,
+        description="Approval status of the production data record. Only settable by supervisor/admin via proper endpoint."
+    )
 
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "quantityProduced": 160,
-            "comments": "Adjusted settings, improved output."
+    model_config = dict(
+        json_schema_extra={
+            "example": {
+                "quantityProduced": 160,
+                "comments": "Adjusted settings, improved output.",
+                "status": "approved",
+            }
         }
-    })
+    )
+
+
+# --- Filters schema for Production Data GET queries (if used) ---
 
 class ProductionDataFilter(BaseModel):
     productName: Optional[str] = None

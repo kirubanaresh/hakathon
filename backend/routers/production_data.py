@@ -35,35 +35,45 @@ async def get_production_data_collection(db=Depends(get_database)) -> AsyncIOMot
     """Dependency function to provide the production data collection."""
     return db["production_data"] # Get the collection from the database instance
 
-
+STATUS_PENDING = "pending"
+STATUS_APPROVED = "approved"
+STATUS_REJECTED = "rejected"
 # --- CRUD Operations for Production Data ---
 
 @router.post("/", response_model=ProductionDataResponse, status_code=status.HTTP_201_CREATED)
 async def create_production_record(
     record_in: ProductionDataCreate,
-    current_user: UserInDB = Depends(role_required(["admin", "operator"])), # Admins or Operators can create
-    collection: AsyncIOMotorCollection = Depends(get_production_data_collection)
+    current_user: UserInDB = Depends(role_required(["admin", "operator"])),  # Only admin or operator can create
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
 ):
     """
     Creates a new production data record.
-    Requires 'admin' or 'operator' role.
+    Status is forcibly set to 'pending' regardless of client input.
     """
+
+    # Convert input model to dict
     record_data = record_in.model_dump(by_alias=True, exclude_unset=True)
+
+    # Force status field to 'pending' ignoring any client input
+    record_data["status"] = "pending"
+
+    # Insert into DB
     result = await collection.insert_one(record_data)
+
+    # Fetch inserted record
     created_record = await collection.find_one({"_id": result.inserted_id})
 
-    if created_record:
-        return ProductionDataResponse(**created_record)
-    raise HTTPException(status_code=500, detail="Failed to create production record.")
+    if created_record is None:
+        raise HTTPException(status_code=500, detail="Failed to create production record.")
 
+    return ProductionDataResponse(**created_record)
 
 @router.get("/", response_model=List[ProductionDataResponse])
 async def get_all_production_records(
-    current_user: UserInDB = Depends(get_current_active_user), # All active users can read
+    current_user: UserInDB = Depends(get_current_active_user),
     collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
     skip: int = Query(0, description="Number of records to skip for pagination"),
     limit: int = Query(100, description="Maximum number of records to return for pagination"),
-    # Filtering parameters
     productName: Optional[str] = None,
     machineId: Optional[str] = None,
     operatorId: Optional[str] = None,
@@ -72,12 +82,18 @@ async def get_all_production_records(
     maxQuantity: Optional[int] = None,
     startDate: Optional[date] = None,
     endDate: Optional[date] = None,
+    status: Optional[str] = Query(None, description="Filter by status: pending, approved, rejected"),
 ):
     """
-    Retrieves all production data records with optional filtering and pagination.
-    Accessible to all authenticated active users.
+    Get all production data records with optional filters and pagination.
+    Role-based access:
+      - Admin: Only approved records (or requested status if allowed).
+      - Supervisor: pending and approved records (or requested status if allowed).
+      - Operator: Only own records (operatorId) regardless of status or filtered by allowed status.
     """
     query = {}
+
+    # Apply filter parameters
     if productName:
         query["productName"] = productName
     if machineId:
@@ -86,112 +102,167 @@ async def get_all_production_records(
         query["operatorId"] = operatorId
     if shift:
         query["shift"] = shift
-
     if minQuantity is not None or maxQuantity is not None:
-        quantity_query = {}
+        quantity_range = {}
         if minQuantity is not None:
-            quantity_query["$gte"] = minQuantity
+            quantity_range["$gte"] = minQuantity
         if maxQuantity is not None:
-            quantity_query["$lte"] = maxQuantity
-        query["quantityProduced"] = quantity_query
-
+            quantity_range["$lte"] = maxQuantity
+        query["quantityProduced"] = quantity_range
     if startDate is not None or endDate is not None:
-        date_query = {}
+        date_range = {}
         if startDate is not None:
-            # For date range, consider the start of the day in UTC
-            date_query["$gte"] = datetime.combine(startDate, datetime.min.time(), tzinfo=timezone.utc)
+            date_range["$gte"] = datetime.combine(startDate, datetime.min.time(), tzinfo=timezone.utc)
         if endDate is not None:
-            # For date range, consider the end of the day in UTC
-            # By setting $lt the start of the next day, we include the entire endDate
-            date_query["$lt"] = datetime.combine(endDate + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-        query["production_date"] = date_query
+            date_range["$lt"] = datetime.combine(endDate + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        query["production_date"] = date_range
 
-    records_cursor = collection.find(query).skip(skip).limit(limit).sort("production_date", -1) # Sort by date descending
-    all_records = await records_cursor.to_list(length=None)
+    # Role based status filtering
+    if "admin" in current_user.roles:
+        allowed_statuses = [STATUS_APPROVED]
+    elif "supervisor" in current_user.roles:
+        allowed_statuses = [STATUS_PENDING, STATUS_APPROVED]
+    elif "operator" in current_user.roles:
+        allowed_statuses = None
+        query["operatorId"] = current_user.username
+    else:
+        return []
 
-    return [ProductionDataResponse(**record) for record in all_records]
+    # Apply status filter param if given, else apply role base filter
+    valid_statuses = [STATUS_PENDING, STATUS_APPROVED, STATUS_REJECTED]
+    if status:
+        if status not in valid_statuses:
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        if allowed_statuses and status not in allowed_statuses:
+            # User not allowed to access this status
+            return []
+        query["status"] = status
+    else:
+        if allowed_statuses:
+            if len(allowed_statuses) == 1:
+                query["status"] = allowed_statuses[0]
+            else:
+                query["status"] = {"$in": allowed_statuses}
+
+    cursor = collection.find(query).skip(skip).limit(limit).sort("production_date", -1)
+    records = await cursor.to_list(length=None)
+    return [ProductionDataResponse(**record) for record in records]
 
 
 @router.get("/{record_id}", response_model=ProductionDataResponse)
 async def get_production_record_by_id(
     record_id: str,
     current_user: UserInDB = Depends(get_current_active_user),
-    collection: AsyncIOMotorCollection = Depends(get_production_data_collection)
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
 ):
-    """
-    Retrieves a single production record by its ID.
-    Accessible to all authenticated active users.
-    """
     if not ObjectId.is_valid(record_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid record ID format.")
-
+        raise HTTPException(status_code=400, detail="Invalid record ID format.")
     record = await collection.find_one({"_id": ObjectId(record_id)})
     if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Production record with ID '{record_id}' not found."
-        )
-    return ProductionDataResponse(**record)
+        raise HTTPException(status_code=404, detail="Production record not found.")
+
+    # Enforce view permissions
+    if "admin" in current_user.roles or "supervisor" in current_user.roles:
+        return ProductionDataResponse(**record)
+    elif "operator" in current_user.roles:
+        if record.get("operatorId") == current_user.username:
+            return ProductionDataResponse(**record)
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized to view this record.")
+    else:
+        raise HTTPException(status_code=403, detail="Not authorized.")
 
 
 @router.put("/{record_id}", response_model=ProductionDataResponse)
 async def update_production_record(
     record_id: str,
     record_update: ProductionDataUpdate,
-    current_user: UserInDB = Depends(role_required(["admin", "operator"])), # Admins or Operators can update
-    collection: AsyncIOMotorCollection = Depends(get_production_data_collection)
+    current_user: UserInDB = Depends(role_required(["admin"])),  # Only admin can update approved records
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
 ):
-    """
-    Updates an existing production data record by its ID.
-    Requires 'admin' or 'operator' role.
-    """
     if not ObjectId.is_valid(record_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid record ID format.")
+        raise HTTPException(status_code=400, detail="Invalid record ID format.")
+
+    record = await collection.find_one({"_id": ObjectId(record_id)})
+    if not record:
+        raise HTTPException(status_code=404, detail="Production record not found.")
+
+    if record.get("status") != STATUS_APPROVED:
+        raise HTTPException(status_code=400, detail="Only approved records can be edited by admin.")
 
     update_data = record_update.model_dump(by_alias=True, exclude_unset=True)
     if not update_data:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided for update.")
+        raise HTTPException(status_code=400, detail="No fields provided for update.")
 
-    update_result = await collection.update_one(
-        {"_id": ObjectId(record_id)},
-        {"$set": update_data}
-    )
-
-    if update_result.modified_count == 0:
-        # Check if record exists but no changes were made (data was identical)
-        if await collection.find_one({"_id": ObjectId(record_id)}):
-            # Record found, but no modification. Return its current state.
-            updated_record = await collection.find_one({"_id": ObjectId(record_id)})
-            return ProductionDataResponse(**updated_record)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Production record with ID '{record_id}' not found.")
+    await collection.update_one({"_id": ObjectId(record_id)}, {"$set": update_data})
 
     updated_record = await collection.find_one({"_id": ObjectId(record_id)})
-    if updated_record:
-        return ProductionDataResponse(**updated_record)
-    raise HTTPException(status_code=500, detail="Production record updated but could not be retrieved.")
+    return ProductionDataResponse(**updated_record)
 
 
 @router.delete("/{record_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_production_record(
     record_id: str,
-    current_user: UserInDB = Depends(role_required(["admin"])), # Only Admins can delete
-    collection: AsyncIOMotorCollection = Depends(get_production_data_collection)
+    current_user: UserInDB = Depends(role_required(["admin"])),  # Only admin can delete approved records
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
 ):
-    """
-    Deletes a production data record by its ID.
-    Requires 'admin' role.
-    """
     if not ObjectId.is_valid(record_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid record ID format.")
+        raise HTTPException(status_code=400, detail="Invalid record ID format.")
+
+    record = await collection.find_one({"_id": ObjectId(record_id)})
+    if not record:
+        raise HTTPException(status_code=404, detail="Production record not found.")
+
+    if record.get("status") != STATUS_APPROVED:
+        raise HTTPException(status_code=400, detail="Only approved records can be deleted.")
 
     delete_result = await collection.delete_one({"_id": ObjectId(record_id)})
-
     if delete_result.deleted_count == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Production record with ID '{record_id}' not found."
-        )
-    return # 204 No Content response
+        raise HTTPException(status_code=404, detail="Failed to delete production record.")
+
+    return None  # 204 No Content
+
+
+# --- Supervisor-specific endpoints ---
+
+@router.post("/{record_id}/approve", status_code=status.HTTP_200_OK)
+async def approve_production_record(
+    record_id: str,
+    current_user: UserInDB = Depends(role_required(["supervisor"])),
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
+):
+    if not ObjectId.is_valid(record_id):
+        raise HTTPException(status_code=400, detail="Invalid record ID format.")
+
+    record = await collection.find_one({"_id": ObjectId(record_id)})
+    if not record:
+        raise HTTPException(status_code=404, detail="Production record not found.")
+
+    if record.get("status") != STATUS_PENDING:
+        raise HTTPException(status_code=400, detail="Only pending records can be approved.")
+
+    await collection.update_one({"_id": ObjectId(record_id)}, {"$set": {"status": STATUS_APPROVED}})
+    return {"message": "Production data approved."}
+
+
+@router.post("/{record_id}/reject", status_code=status.HTTP_200_OK)
+async def reject_production_record(
+    record_id: str,
+    current_user: UserInDB = Depends(role_required(["supervisor"])),
+    collection: AsyncIOMotorCollection = Depends(get_production_data_collection),
+):
+    if not ObjectId.is_valid(record_id):
+        raise HTTPException(status_code=400, detail="Invalid record ID format.")
+
+    record = await collection.find_one({"_id": ObjectId(record_id)})
+    if not record:
+        raise HTTPException(status_code=404, detail="Production record not found.")
+
+    if record.get("status") != STATUS_PENDING:
+        raise HTTPException(status_code=400, detail="Only pending records can be rejected.")
+
+    await collection.update_one({"_id": ObjectId(record_id)}, {"$set": {"status": STATUS_REJECTED}})
+    return {"message": "Production data rejected."}
 
 # --- Aggregation and Reporting Endpoints (for Dashboards) ---
 

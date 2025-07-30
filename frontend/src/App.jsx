@@ -12,6 +12,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import Home from './components/Home';
 import './App.css';
+import SupervisorApprovalPage from './components/SupervisorApprovalPage';
 
 // --- NEW MUI IMPORTS ---
 import { createTheme, ThemeProvider } from '@mui/material/styles';
@@ -206,6 +207,11 @@ const Header = () => {
               </Button>
             </HeaderLink>
           )}
+          {isAuthenticated() && hasRole(['supervisor']) && (
+            <HeaderLink to="/supervisor/approvals">
+              <Button color="inherit">Approvals</Button>
+            </HeaderLink>
+          )}
 
           {isAuthenticated() && hasRole(['admin']) && (
             <HeaderLink to="/admin-panel">
@@ -315,6 +321,14 @@ function App() {
                   element={
                     <ProtectedRoute>
                       <OperatorProductionPage />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route
+                  path="/supervisor/approvals"
+                  element={
+                    <ProtectedRoute roles={['supervisor']}>
+                      <SupervisorApprovalPage />
                     </ProtectedRoute>
                   }
                 />
