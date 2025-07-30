@@ -32,6 +32,16 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if user_data.get("status") != "approved":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not approved. Please wait for approval.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+# Continue with password verify and token creation below...
+
+
     if not verify_password(form_data.password, user_data["hashed_password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
