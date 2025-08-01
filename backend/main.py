@@ -9,7 +9,7 @@ from backend.auth.router import router as auth_router
 from backend.routers import users
 from backend.routers import notifications
 from backend.routers import reports
-from backend.reference_data.router import router as reference_data_router
+
 from backend.production_data.router import router as production_data_router
 
 # IMPORTANT: MongoDB connection imports
@@ -83,10 +83,6 @@ app.include_router(notifications.router, tags=["Notifications"])
 # Reports Router (FIXED: No extra prefix here to avoid /reports/reports)
 # Assuming backend/routers/reports.py has router = APIRouter(prefix="/reports", ...)
 app.include_router(reports.router, tags=["Reports"])
-
-
-# Reference Data Router (FIXED: No extra prefix here)
-app.include_router(reference_data_router, tags=["Reference Data"])
 
 # Production Data Router (FIXED: No extra prefix here)
 app.include_router(production_data_router, tags=["Production Data"])
